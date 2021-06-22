@@ -2,7 +2,7 @@
 cat("Program path:", unlist(strsplit(grep(commandArgs(), pattern = "file=", value = T), split = "="))[2], "\n")
 arguments <- commandArgs(trailingOnly = TRUE)
 arguments
-if(length(arguments) != 9) {stop("This program requires nine arguments. The first one is the destination folder, the second one is the CSV file with sample names and grouping variables, the third determines the sample ID variable, the fourth - grouping variable, the fifth - independent factor, the sixth - TXT file, the seventh is the number of threads to use, the eighth says if samples are paired, while the nineth determines the column with pair indicators.")}
+if(length(arguments) != 9) {stop("This program requires nine arguments. The first one is the destination folder, the second one is the CSV file with sample names and grouping variables, the third determines the sample ID variable, the fourth - grouping variable, the fifth - independent factor, the sixth - file with a gene list (one gene per line) to calculate the gene signature, the seventh is the number of threads to use, the eighth says if samples are paired, while the ninth determines the column with pair indicators.")}
 
 csvfile <- arguments[2]
 sampleid <- arguments[3]
