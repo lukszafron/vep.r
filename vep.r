@@ -5,16 +5,26 @@ arguments <- commandArgs(trailingOnly = TRUE)
 
 if(length(arguments) != 9) {stop("This program requires nine arguments. The first one is the destination folder, the second one is a semicolon-delimited CSV file with sample names and grouping variables, the third determines the sample ID variable, the fourth - grouping variable, the fifth - independent factor, the sixth - file with a gene list (one gene per line) to calculate the gene signature, the seventh is the number of threads to use, the eighth says if samples are paired, while the ninth determines the column with pair indicators.")}
 arguments
+arguments.backup <- arguments
 
-csvfile <- arguments[2]
-sampleid <- arguments[3]
-grouping.cols <- unlist(strsplit(arguments[4], split = "\\,"))
-indfactor <- arguments[5]
-txt.file <- arguments[6]
-threads <- as.numeric(arguments[7])
-paired.samples <- arguments[8]
-pair.ind <- arguments[9]
+read.args <- function() {
+csvfile <<- arguments[2]
+sampleid <<- arguments[3]
+grouping.cols <<- unlist(strsplit(arguments[4], split = "\\,"))
+indfactor <<- arguments[5]
+txt.file <<- arguments[6]
+threads <<- as.numeric(arguments[7])
+paired.samples <<- as.logical(arguments[8])
+pair.ident <<- arguments[9]
+}
+read.args()
+
 genome.ver <- grep(unlist(strsplit(arguments[1], split = "/")), pattern = "\\.genome", value = T)
+
+if(grepl(arguments[1], pattern = "BAMs_wo_dups"))
+{dups <- FALSE; csv.pat <- "\\.sorted\\.no_dups_VEP\\.(SNP|NON_SNP)\\.csv$"} else if(grepl(arguments[1], pattern = "BAMs_w_dups")) 
+{dups <- TRUE; csv.pat <- "\\.sorted_VEP\\.(SNP|NON_SNP)\\.csv$"} else {stop("The duplication status cannot be determined.")}
+if(dups) {BAM.type <- "BAM files with duplicates"} else {BAM.type <- "BAM files without duplicates"}
 
 if(grepl(genome.ver, pattern = "hg38|GRCh38")) {genome <- "hg38"} else
 if(grepl(genome.ver, pattern = "hg19|GRCh37")) {genome <- "hg19"} else 
@@ -29,24 +39,37 @@ library(stringi)
 library(Hmisc)
 library(TOSTER)
 library(genefilter)
+library(tidyr)
+library(matrixStats)
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(pals)
+library(openxlsx)
+library(pdftools)
+library(ggfortify)
+library(limma)
 
 registerDoMC(threads)
 
 csvtable.full <- fread(file = csvfile, sep = ";", header = T, stringsAsFactors = F, check.names = T)
 csvtable.full <- csvtable.full[!grepl(csvtable.full[[indfactor]], pattern = "^([[:space:]]?)+$"),]
 csvtable.full <- csvtable.full[!is.na(csvtable.full[[indfactor]]),]
-if(paired.samples == "TRUE") {csvtable.full <- csvtable.full[!is.na(csvtable.full[[pair.ind]]),]}
-csvtable.full[[sampleid]] <- gsub(csvtable.full[[sampleid]], pattern = "#", replacement = ".")
-rownames(csvtable.full) <- csvtable.full[[sampleid]]
+if(paired.samples) {csvtable.full <- csvtable.full[!is.na(csvtable.full[[pair.ident]]),]}
 
-save.image <- function(file){save(list=grep(ls(all.names = TRUE, envir = .GlobalEnv), pattern = "^txt.file$", value = T, invert = T), file = file)}
+csvtable.full[[sampleid]] <- gsub(csvtable.full[[sampleid]], pattern = "#", replacement = ".")
+csvtable.full[[sampleid]] <- sub(csvtable.full[[sampleid]], pattern = "^ *(.*) *$", replacement = "\\1")
+rownames(csvtable.full) <- csvtable.full[[sampleid]]
+csvtable.full[[indfactor]] <- as.factor(gsub(csvtable.full[[indfactor]], pattern = "^ *(.*) *$", replacement = "\\1"))
+
+save.image <- function(file){save(list=grep(ls(all.names = TRUE, envir = .GlobalEnv), pattern = "^arguments$", value = T, invert = T), file = file)}
 
 vep.r <- function(groupid) {
 
-mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
+var.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
     
-    if(!all(rownames(data) == rownames(anno))) {stop(paste("Sample names:", paste(rownames(data), collapse = ", "), "and annotations:",  paste(rownames(anno), collapse = ", "), "do not match."))}
-    if(paired.samples == TRUE) {rownames(data) <- anno.full.names[["full.sample.names"]]}
+    if(!all(rownames(data) == sub(rownames(anno), pattern = "#.*$", replacement = ""))) {stop(paste("Sample names:", paste(rownames(data), collapse = ", "), "and annotations:",  paste(rownames(anno), collapse = ", "), "do not match."))}
+    rownames(data) <- rownames(anno)
     data.bool <- data
     data.bool[data.bool == 0] <- FALSE
     data.bool[data.bool > 0] <- TRUE
@@ -56,10 +79,10 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
     data.bool.name <- paste(arg1.value.name, "bool", antype, groupid, make.names(impact), sep = ".")
     assign(data.bool.name, value = data.bool, envir = .GlobalEnv)
     
-    if(paired.samples == "TRUE") {
-      data.df <- setNames(data.frame(rowSums(data), anno), nm = c("Counts", indfactor, pair.ind))
-      data.df <- data.df[order(data.df[[indfactor]], data.df[[pair.ind]]),] 
-      data.df[[pair.ind]] <- as.factor(data.df[[pair.ind]]) } else {
+    if(paired.samples) {
+      data.df <- setNames(data.frame(rowSums(data), anno), nm = c("Counts", indfactor, pair.ident))
+      data.df <- data.df[order(data.df[[indfactor]], data.df[[pair.ident]]),] 
+      data.df[[pair.ident]] <- as.factor(data.df[[pair.ident]]) } else {
         
         data.df <- setNames(data.frame(rowSums(data), anno), nm = c("Counts", indfactor))
         data.df <- data.df[order(data.df[[indfactor]]),] }
@@ -77,7 +100,7 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       level.names <- levels(as.factor(as.character(data.df[[indfactor]])))
       for(i in seq(1, ncol(combn(level.names, m = 2)))) {sel.levels <- combn(level.names, m = 2)[,i]
       sub.df <- subset(data.df, subset = get(indfactor) %in% sel.levels)
-      if(paired.samples == "TRUE") {
+      if(paired.samples) {
         mw.res <- with(sub.df, wilcox.test(Counts ~ get(indfactor), paired = TRUE))} else {
           mw.res <- with(sub.df, wilcox.test(Counts ~ get(indfactor), paired = FALSE))  
         }
@@ -108,7 +131,7 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
     if(length(rownames(data.df))>56) {width <- length(rownames(data.df))/8} else {width <- 7}
     pdf(paste(runid, antype, "impact", impact.name, "VEP_analysis barplot-samples.pdf", sep = "."), width = width)
     
-    if(paired.samples == "TRUE") {
+    if(paired.samples) {
       rnames <- factor(rownames(data.df), levels = rownames(data.df))
       ggplot1 <- ggplot(data.df, aes(x = rnames, y = Counts, fill = get(indfactor))) + 
         geom_bar(stat = "identity") + 
@@ -139,7 +162,7 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       categories <- unique(anno[[indfactor]])
       all.groups <- foreach(i = categories, .combine = rbind) %dopar% {
         group.tmp <- rownames(anno)[anno[[indfactor]] == i]
-        data.sub.tmp <- data[sub(rownames(data), pattern = "#.*$", replacement = "") %in% group.tmp, , drop = F]
+        data.sub.tmp <- data[sub(rownames(data), pattern = "#.*$", replacement = "") %in% sub(group.tmp, pattern = "#.*$", replacement = ""), , drop = F]
         countSums <- colSums(data.sub.tmp)
         countMeans <- colMeans(data.sub.tmp)
         countSds <- colSds(as.matrix(data.sub.tmp))
@@ -149,7 +172,7 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
         data.frame(countSums, countMeans, countSds, countSE, count95CI, rep(i), colnames(data.sub.tmp))
       }
       
-      all.groups <- setNames(all.groups, nm = c("Count_sum", "Count_mean", "Count_SD", "Count_SE", "Count_95CI", indfactor, "Gene_name"))
+      all.groups <- setNames(all.groups, nm = c("Count_sum", "Count_mean", "Count_SD", "Count_SE", "Count_0.95_CI", indfactor, "Gene_name"))
       all.groups <- all.groups[,c(length(all.groups),length(all.groups)-1, seq(1,length(all.groups)-2))]
       all.groups <- all.groups[all.groups[["Count_sum"]] > 0,]
       all.groups <- all.groups[order(all.groups[[indfactor]]),]
@@ -158,20 +181,20 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       pdf(paste(runid, antype, "impact", impact.name, "VEP_analysis barplot-genes.pdf", sep = "."), width = width)
       ggplot2 <- ggplot(all.groups, aes(x = Gene_name, y = Count_mean, fill = get(indfactor))) + 
         geom_bar(stat = "identity", position=position_dodge()) + 
-        geom_errorbar(aes(y = Count_mean, ymin=Count_mean-Count_95CI, ymax=Count_mean+Count_95CI), position = position_dodge(), color = "darkgrey") +
+        geom_errorbar(aes(y = Count_mean, ymin=Count_mean-Count_0.95_CI, ymax=Count_mean+Count_0.95_CI), position = position_dodge(), color = "darkgrey") +
         theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
         labs(title = paste0("Frequency of ", antype, " alterations with 95% CI ", "(", "impact: ", impact.name, ")"), fill = indfactor) +
         scale_fill_manual(values = as.vector(cols25()))
       try(print(ggplot2))
       dev.off()
       
-      sheet.name <- substr(paste("Mut.per.gene.impact",impact.name, sep = "."), 1, 31)
+      sheet.name <- substr(paste("Var.per.gene.impact",impact.name, sep = "."), 1, 31)
       if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
       addWorksheet(wb = wb, sheetName = sheet.name)
       writeData(x = all.groups, wb = wb, sheet = sheet.name, rowNames = F)
       
-      muts.per.gene.name <- paste("muts.per.gene", antype, make.names(impact), sep = ".")
-      assign(muts.per.gene.name, value = all.groups)
+      vars.per.gene.name <- paste("vars.per.gene", antype, make.names(impact), sep = ".")
+      assign(vars.per.gene.name, value = all.groups)
       
       data.t <- t(data)
       data.t <- data.t[rowSums(data.t) > 0, , drop = F]
@@ -185,7 +208,8 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       colnames(data.t) <- sub(colnames(data.t), pattern = "#.*$", replacement = "")
       data.t <- data.t[,order(colnames(data.t)), drop = F]
       anno <- anno[order(rownames(anno)), , drop = F]
-      if(!all(colnames(data.t) == rownames(anno))) {stop("Annotations do not match sample names.")}
+      
+      if(!all(colnames(data.t) == sub(rownames(anno), pattern = "#.*$", replacement = ""))) {stop("Annotations do not match sample names.")}
       data.t <- data.t[,order(anno[[indfactor]]), drop = F]
       rownames(data) <- sub(rownames(data), pattern = "#.*$", replacement = "")
       
@@ -207,16 +231,16 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       dev.off()
       
       data.prcomp <- prcomp(data.log2)
-      anno.prcomp <- anno[match(rownames(data.prcomp$x), rownames(anno)), , drop = F]
-      anno.prcomp[["rownames"]] <- rownames(anno.prcomp)
+      anno.prcomp <- anno[match(rownames(data.prcomp$x), sub(rownames(anno), pattern = "#.*$", replacement = "")), , drop = F]
+      anno.prcomp[[sampleid]] <- rownames(anno.prcomp)
       if(nrow(anno.prcomp) > 25) {
         ind.length <- length(levels(anno.prcomp[[indfactor]]))} else {
-          ind.length <- length(anno.prcomp[["rownames"]])
+          ind.length <- length(anno.prcomp[[sampleid]])
         }
       
       pdf(paste(runid, antype, "impact", impact.name, "VEP_analysis.PCA.plot.pdf", sep = "."), width = 10, height = 10)
       if(ncol(data.prcomp$x) > 1) {
-        ap1 <- autoplot(data.prcomp, data = anno.prcomp, size = 3, colour = if(nrow(anno.prcomp) > 25) {indfactor} else {"rownames"}, shape = if(nrow(anno.prcomp) > 25) {pty=20} else {indfactor}) + 
+        ap1 <- autoplot(data.prcomp, data = anno.prcomp, size = 3, colour = if(nrow(anno.prcomp) > 25) {indfactor} else {sampleid}, shape = if(nrow(anno.prcomp) > 25) {pty=20} else {indfactor}) + 
           scale_color_manual(values = if (ind.length > 25) {rainbow(ind.length)} else {as.vector(cols25())}) + coord_fixed() + 
           labs(title = paste("PCA plot", runid, antype, paste0("impact: ", impact.name), sep = "-")) + 
           theme(plot.title = element_text(hjust = 0.5))
@@ -231,105 +255,164 @@ mut.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       addWorksheet(wb = wb, sheetName = sheet.name)
       writeData(x = data.t, wb = wb, sheet = sheet.name, rowNames = T)
       
-      comp.file <- paste(prefix, "impact", impact.name, paste("gene.signature", gene.signature, sep = ":"), "comparison.summary.csv", sep = ".")
-      
-      min.N <- min(table(anno[[indfactor]]))
-      min.N.limit <- 2
-      if(min.N >= min.N.limit) {
-        all.tested.genes <- colnames(data)
-        low.mut.genes.file <- paste(indfactor, "low.mut.genes", sep = ".")
-        Cohen.d <- round(max(powerTOSTtwo(alpha=0.05, statistical_power=0.8, N = min.N)),2)
-        
-        f.data.stats <- function(data) {rbind(colMeans(data[,2:3], na.rm = T), 
-                                              colSds(as.matrix(data[,2:3]), na.rm = T), 
-                                              colSums(!is.na(data[,2:3])))}
-        ff.10 <- pOverA(0.1,0, na.rm = T)
-        
-        value.conv <- function(value) {
-          if(!is.na(value)) {
-            value <- as.numeric(value)
-            if(abs(value) < 0.001) {
-              value <- formatC(value, format = "e", digits = 3)} else 
-              {
-                value <- round(value,4)}}
-          return(as.numeric(value))}
-        
-        TOST.res <- foreach(gene.name = all.tested.genes, .combine = rbind) %dopar% {
-          df.tmp <- data.frame(gene = data[[gene.name]], indfactor = anno[[indfactor]], sample = rownames(anno))
-          df.tmp <- reshape(data = df.tmp, timevar = "indfactor", direction = "wide", idvar = "sample")
-          
-          if(any(sapply(df.tmp[,2:3],ff.10))) {
-            df.tmp.stats <- f.data.stats(data = df.tmp)
-            df.tmp.stats[2,][df.tmp.stats[2,] == 0] <- 1e-50
-            
-            t1 <- TOSTtwo(m1=df.tmp.stats[1,1],
-                          m2=df.tmp.stats[1,2],
-                          sd1=df.tmp.stats[2,1],
-                          sd2=df.tmp.stats[2,2],
-                          n1=df.tmp.stats[3,1],
-                          n2=df.tmp.stats[3,2],
-                          low_eqbound_d=-Cohen.d,
-                          high_eqbound_d=Cohen.d,
-                          alpha = 0.05, var.equal=FALSE, plot = F, verbose = F)
-            
-            v1 <- c(t1$diff, t1$TOST_p1, t1$TOST_p2, t1$low_eqbound, t1$high_eqbound, t1$high_eqbound_d, t1$NHST_p)
-            v1 <- sapply(v1, value.conv)
-            
-            if(max(c(t1$TOST_p1,t1$TOST_p2)) < 0.05 & t1$NHST_p >= 0.05) {
-              v1 <- c(gene.name, v1, "Yes")
+if(length(levels(anno[[indfactor]])) >1) {
+          gene.signature.xlsx.name <- paste(prefix, "impact", impact.name, paste("gene.signature", gene.signature, sep = ":"), "comparison_summary.xlsx", sep = ".")
+
+          wb3 <- createWorkbook()
+          combinations <- combn(levels(anno[[indfactor]]), m = 2)
+          for(iter in seq(1,ncol(combinations))) {
+            comparison.group <- substr(paste(combinations[,iter], collapse = "_vs_"),1,31)
+            addWorksheet(wb = wb3, sheetName = comparison.group)
+            anno.sel <- anno[anno[[indfactor]] %in% combinations[, iter], , drop = F]
+            anno.sel[[indfactor]] <- factor(anno.sel[[indfactor]])
+            data.sel <- data[match(sub(rownames(anno.sel), pattern = "#.*$", replacement = ""), rownames(data)), , drop = F]
+            if(! all(rownames(data.sel) == sub(rownames(anno.sel), pattern = "#.*$", replacement = ""))) {stop("Sample names in the data and anno objects do not match.")}
+
+            missing.group <- combinations[,iter][! combinations[,iter] %in% anno.sel[[indfactor]]]
+            if(length(missing.group) == 0) {
+            min.N <- min(table(anno.sel[[indfactor]]))
+            min.N.limit <- 2
+            if(min.N >= min.N.limit) {
+              all.tested.genes <- unique(colnames(data.sel))
+
+              f.data.stats <- function(data) {rbind(colMeans(data[,-1], na.rm = T),
+                                                    Sds <- colSds(as.matrix(data[,-1]), na.rm = T),
+                                                    pooledSd <- sqrt(sum(sapply(Sds, function(x) {x**2}))/2),
+                                                    colSums(!is.na(data[,-1])),
+                                                    if(paired.samples) {
+                                                      sddif <- sd(data[,2] - data[,3])
+                                                      cor.res <- cor.test(x = data[,2], data[,3])
+                                                      if(is.na(cor.res$estimate)) {cor.res$estimate <- 0} else
+                                                      if(cor.res$estimate == 1) {cor.res$estimate <- 0.9999999}
+                                                      rbind(rep(sddif,2),
+                                                            rep(cor.res$estimate,2)) } )
+              }
+              ff.10 <- pOverA(0.101,0, na.rm = T)
+
+              value.conv <- function(value) {
+                if(!is.na(value)) {
+                  value <- as.numeric(value)
+                  if(abs(value) < 0.001) {
+                    value <- formatC(value, format = "e", digits = 3)} else
+                    {
+                      value <- round(value,4)}
+                  return(as.numeric(value))} else {return(value)}}
+
+              TOST.res <- foreach(gene.name = all.tested.genes, .combine = rbind) %do% {
+                if(! paired.samples) {
+                  df.tmp <- data.frame(sample = rownames(anno.sel), gene = data.sel[[gene.name]], indfactor = anno.sel[[indfactor]])
+                  df.tmp <- reshape(data = df.tmp, timevar = "indfactor", direction = "wide", idvar = "sample")
+                } else {
+                  df.tmp <- data.frame(sample = rownames(anno.sel), gene = data.sel[[gene.name]], indfactor = anno.sel[[indfactor]], Pairs = anno.sel[[pair.ident]])
+                  df.tmp <- reshape(df.tmp[,-1], idvar = "Pairs", timevar = "indfactor", direction = "wide")
+                }
+
+                if(any(sapply(df.tmp[,-1],ff.10))) {
+                  df.tmp.stats.two <- f.data.stats(data = df.tmp)
+                  df.tmp.stats.two[2,][df.tmp.stats.two[2,] == 0] <- 1e-50
+
+                  sink("/dev/null")
+                  sink(type = "m")
+                  
+                  if(paired.samples) {
+                    eqbound <- suppressMessages(round(max(powerTOSTpaired.raw(alpha=0.05, statistical_power=0.8, N = min.N, sdif = df.tmp.stats.two[5,1])),2)) } else {
+                      eqbound <- suppressMessages(round(max(powerTOSTtwo.raw(alpha=0.05, statistical_power=0.8, N = min.N, sdpooled = df.tmp.stats.two[3,1])),2)) }
+                  
+                  sink()
+                  
+                  if(eqbound == 0) {eqbound <- 0.1}
+                  
+                  if(paired.samples) {
+                    t1 <- tsum_TOST(m1=df.tmp.stats.two[1,1],
+                                    m2=df.tmp.stats.two[1,2],
+                                    sd1=df.tmp.stats.two[2,1],
+                                    sd2=df.tmp.stats.two[2,2],
+                                    n1=df.tmp.stats.two[4,1],
+                                    n2=df.tmp.stats.two[4,2],
+                                    low_eqbound=-eqbound,
+                                    high_eqbound=eqbound,
+                                    alpha = 0.05,
+                                    var.equal=FALSE,
+                                    eqbound_type = "raw",
+                                    paired = TRUE,
+                                    r12 = df.tmp.stats.two[6,1])
+                  } else {
+                    t1 <- tsum_TOST(m1=df.tmp.stats.two[1,1],
+                                    m2=df.tmp.stats.two[1,2],
+                                    sd1=df.tmp.stats.two[2,1],
+                                    sd2=df.tmp.stats.two[2,2],
+                                    n1=df.tmp.stats.two[4,1],
+                                    n2=df.tmp.stats.two[4,2],
+                                    low_eqbound=-eqbound,
+                                    high_eqbound=eqbound,
+                                    alpha = 0.05,
+                                    var.equal=FALSE,
+                                    eqbound_type = "raw",
+                                    paired = FALSE)
+                  }
+
+                  group.names <- gsub(colnames(df.tmp.stats.two), pattern = "gene\\.", replacement = "")
+                  v1 <- c(t1$method, group.names, df.tmp.stats.two[4,], df.tmp.stats.two[1,], df.tmp.stats.two[2,], -eqbound, eqbound, if(paired.samples) {df.tmp.stats.two[6,1]} else {NA}, t1$TOST["TOST Lower","p.value"], t1$TOST["TOST Upper","p.value"], t1$TOST["t-test","p.value"])
+                  v1[4:length(v1)] <- sapply(v1[4:length(v1)], value.conv)
+
+                  if(max(c(t1$TOST["TOST Lower","p.value"], t1$TOST["TOST Upper","p.value"])) < 0.05 & t1$TOST["t-test","p.value"] >= 0.05) {
+                    v1 <- c(gene.name, v1, "Yes")
+                  } else {
+                    v1 <- c(gene.name, v1, "No")
+                  }
+                  v1
+                }
+              }
+              if(!is.null(TOST.res)) {
+                if(is.vector(TOST.res)) {TOST.res <- as.data.frame(t(TOST.res), stringsAsFactors = F)} else
+                {TOST.res <- as.data.frame(TOST.res, stringsAsFactors = F)}
+
+                rownames(TOST.res) <- NULL
+                colnames(TOST.res) <- c("Gene name", "Test type", "Group1 name", "Group2 name", "Group1 N", "Group2 N", "Group1 mean", "Group2 mean", "Group1 SD", "Group2 SD", "Lower equivalence bounds", "Upper equivalence bounds", "Pearson's correlation R2", "TOST Lower p-value", "TOST Upper p-value", "NHST t-test p-value","Equivalence")
+                TOST.res <- TOST.res %>% mutate(across(!c(1:4,17), as.numeric))
+                TOST.res$`NHST t-test BH-adjusted p-value` <- p.adjust(TOST.res$`NHST t-test p-value`, method = "BH")
+
+                TOST.res.no.NA <- TOST.res[rowSums(is.na(TOST.res[,-13])) == 0,, drop = F]
+                TOST.res.no.NA[["Difference"]][(TOST.res.no.NA$`TOST Lower p-value` >= 0.05 | TOST.res.no.NA$`TOST Upper p-value` >= 0.05) & TOST.res.no.NA$`NHST t-test BH-adjusted p-value` < 0.05] <- "Yes"
+                TOST.res <- merge(x = TOST.res, y = TOST.res.no.NA %>% dplyr::select(c("Gene name", "Difference")), by.x = "Gene name", by.y = "Gene name", all = T)
+                TOST.res <- distinct(TOST.res)
+                TOST.res$Difference[is.na(TOST.res$Difference)] <- "No"
+                TOST.res <- TOST.res[,c(1:16,18,17,19)]
+
+                TOST.res <- TOST.res[order(as.character(TOST.res[["Equivalence"]]), as.character(TOST.res[["Difference"]]), as.character(TOST.res[["Gene name"]]), decreasing = c(T,T,F), method = "radix"),]
+
+                evalGenes.N <- if(gene.signature == "ALL_GENES") {ncol(data.sel)} else {length(gene.list1.conv)}
+                equivalent.genes.N <- sum(TOST.res$Equivalence == "Yes")
+                non.equivalent.genes.N <- sum(TOST.res$Equivalence == "No")
+                different.genes.N <- sum(TOST.res$Difference == "Yes")
+                non.different.genes.N <- sum(TOST.res$Difference == "No")
+
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes evaluated to determine the gene signature:", evalGenes.N), startRow = 1)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes with at least one alteration in at least one sample:", length(all.tested.genes)), startRow = 2)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes passing the variant frequency filter (at least one alteration in more than 10% of samples in at least one group):", nrow(TOST.res)), startRow = 3)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes with non-equivalent alteration profiles:", non.equivalent.genes.N), startRow = 5)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes with equivalent alteration profiles:", equivalent.genes.N), startRow = 6)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The percentage of genes with equivalent alteration profiles:", round(equivalent.genes.N/nrow(TOST.res)*100,2), "%"), startRow = 7)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes with non-different alteration profiles (after the BH-correction):", non.different.genes.N), startRow = 9)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes with different alteration profiles (after the BH-correction):", different.genes.N), startRow = 10)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The percentage of genes with different alteration profiles (after the BH-correction):", round(different.genes.N/nrow(TOST.res)*100,2), "%"), startRow = 11)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The table below contains TOST and NHST statistical results for all the genes that passed the variant frequency filtering."), startRow = 13)
+
+                writeData(wb = wb3, sheet = comparison.group, x = TOST.res, startRow = 15, keepNA = TRUE, na.string = "NA")
+              } else {
+                evalGenes.N <- if(gene.signature == "ALL_GENES") {ncol(data.sel)} else {length(gene.list1.conv)}
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes evaluated to determine the gene signature:", evalGenes.N), startRow = 1)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes with at least one alteration in at least one sample:", length(all.tested.genes)), startRow = 2)
+                writeData(wb = wb3, sheet = comparison.group, x = paste("The number of genes passing the variant frequency filter (at least one alteration in more than 10% of samples in at least one group):", 0), startRow = 3)
+              }
             } else {
-              v1 <- c(gene.name, v1, "No")
+              writeData(wb = wb3, sheet = comparison.group, x = paste0("The number of samples in one of the analyzed groups: ", min.N, " is lower than the predefined limit: ", min.N.limit, ". Therefore, the gene signature comparison has not been performed."))
             }
-            v1
+            } else {
+              writeData(wb = wb3, sheet = comparison.group, x = paste0("There are no samples in the following analyzed group(s): ", paste(missing.group, collapse = ", "), "."))
           }
-        }
-        
-        if(!is.null(TOST.res)) {
-          if(is.vector(TOST.res)) {TOST.res <- as.data.frame(t(TOST.res), stringsAsFactors = F)} else 
-          {TOST.res <- as.data.frame(TOST.res, stringsAsFactors = F)}
-          
-          rownames(TOST.res) <- NULL
-          colnames(TOST.res) <- c("Gene_name", "Mean_diff.", "TOST_p1", "TOST_p2", "Low_eqbound", "High_eqbound", "Cohen's d-value", "NHST_p", "Equivalence")
-          TOST.res <- TOST.res %>% mutate(across(!c(Gene_name,Equivalence), as.numeric))
-          
-          TOST.res.no.NA <- TOST.res[rowSums(is.na(TOST.res)) == 0,, drop = F]
-          TOST.res.no.NA[["Difference"]][(TOST.res.no.NA$TOST_p1 >= 0.05 | TOST.res.no.NA$TOST_p2 >= 0.05) & TOST.res.no.NA$NHST_p < 0.05] <- "Yes"
-          TOST.res <- merge(x = TOST.res, y = TOST.res.no.NA %>% dplyr::select(c("Gene_name", "Difference")), by.x = "Gene_name", by.y = "Gene_name", all = T)
-          TOST.res$Difference[is.na(TOST.res$Difference)] <- "No"
-          
-          TOST.res <- TOST.res[order(as.character(TOST.res$Equivalence), as.character(TOST.res$Difference), as.character(TOST.res$Gene_name), decreasing = c(T,T,F), method = "radix"),]
-          
-          equivalent.genes.N <- sum(TOST.res$Equivalence == "Yes")
-          non.equivalent.genes.N <- sum(TOST.res$Equivalence == "No")
-          different.genes.N <- sum(TOST.res$Difference == "Yes")
-          non.different.genes.N <- sum(TOST.res$Difference == "No")
-          
-          sink(file = comp.file)
-          
-          cat(paste0("The number of genes evaluated to determine the gene signature:\t", if(gene.signature == "ALL_GENES"){ncol(data)} else {length(gene.list1.conv)}, "\n"))
-          cat(paste0("The number of genes with at least one alteration in at least one sample:\t", length(all.tested.genes), "\n"))
-          cat(paste0("The number of genes passing the mutation frequency filter of 10%:\t", nrow(TOST.res), "\n\n"))
-          cat(paste0("The number of genes with non-equivalent alteration profiles:\t", non.equivalent.genes.N, "\n"))
-          cat(paste0("The number of genes with equivalent alteration profiles:\t", equivalent.genes.N, "\n"))
-          cat(paste0("The percentage of genes with equivalent alteration profiles:\t", round(equivalent.genes.N/nrow(TOST.res)*100,2), "%\n\n"))
-          cat(paste0("The number of genes with non-different alteration profiles:\t", non.different.genes.N, "\n"))
-          cat(paste0("The number of genes with different alteration profiles:\t", different.genes.N, "\n"))
-          cat(paste0("The percentage of genes with different alteration profiles:\t", round(different.genes.N/nrow(TOST.res)*100,2), "%\n\n"))
-          cat("The table below contains TOST and NHST statistical results for all the genes that passed the mutation frequency filtering.\n\n")
-          
-          write.table(x = TOST.res, file = comp.file, row.names = F, sep = ";", append = T, col.names = T)
-        } else {
-          sink(file = comp.file)
-          
-          cat(paste0("The number of genes evaluated to determine the gene signature was:\t", if(gene.signature == "ALL_GENES"){ncol(data)} else {length(gene.list1.conv)}, "\n"))
-          cat(paste0("The number of genes with at least one alteration in at least one sample:\t", length(all.tested.genes), "\n"))
-          cat(paste0("The number of genes passing the mutation frequency filter of 10%:\t", 0, "\n")) 
-        }
-        sink()
-      } else {
-        sink(file = comp.file)
-        cat(paste0("The number of samples in one of the analyzed groups: ", min.N, " is lower than the predefined limit: ", min.N.limit, ". Therefore, the gene signature comparison has not been performed.\n"))
-        sink()
+          }
+          saveWorkbook(wb = wb3, file = gene.signature.xlsx.name, overwrite = T)
       }
     }
     wb.name <- as.character(sys.call()[["wb"]])
@@ -342,40 +425,22 @@ runid <- sub(sub(workdir, pattern = "^.*RUNS/", replacement = ""), pattern = "/M
 antype <- sub(sub(workdir, pattern = "\\/Summary\\/.*", replacement = ""), pattern = "^.*\\/", replacement = "")
 impacts <- c("HIGH", "(HIGH|MODERATE)")
 
-library(doMC)
-library(foreach)
-library(dplyr)
-library(tidyr)
-library(matrixStats)
-library(pheatmap)
-library(RColorBrewer)
-library(ggplot2)
-library(pals)
-library(openxlsx)
-library(data.table)
-library(pdftools)
-library(ggfortify)
-library(limma)
-
 dir.create(workdir, recursive = T)
 gene.signature <- gsub(txt.file, pattern = "^.*\\/", replacement = "")
 setwd(workdir)
+unlink("Warning.no.vcfs.txt")
 prefix <- paste(runid, antype, groupid, indfactor, paste("paired", paired.samples, sep = ":"), sep = ".")
-
-save.image(paste(prefix, "VEP_analysis.RData", sep = "."))
+save.image(file = paste(prefix, "VEP_analysis.initial.RData", sep = "."))
 
 if(! file.exists(paste(prefix, "VEP_analysis.final.RData", sep = "."))) {
-unlink(paste(prefix, "VEP_analysis.xlsx", sep = "."))
 
-registerDoMC(threads)
-
-file.list <- list.files("../../..", pattern = ".*\\.csv$", full.names = T)
+file.list <- list.files("../../..", pattern = csv.pat, full.names = T)
 # Exclude empty csv files 
 file.list <- file.list[sapply(file.list, file.size) > 0]
-s.names <- sub(file.list, pattern = "(\\.\\.\\/\\.\\.\\/\\.\\.\\/)(.*)(\\.sorted(\\.|_).*\\csv$)", replacement = "\\2")
+s.names <- sub(file.list, pattern = paste0("(\\.\\.\\/\\.\\.\\/\\.\\.\\/)(.*)", paste0("(", csv.pat, ")")), replacement = "\\2")
 s.names <- gsub(s.names, pattern = "#", replacement = ".")
 
-if(length(file.list) == 0) {stop("The file list is empty.")}
+if(length(file.list) >0) {
 
 sel.columns <- c("Gene", "SYMBOL", "SYMBOL_SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
 
@@ -384,7 +449,7 @@ if(!file.exists(paste0("../../", runid, ".", antype, ".df.full.RData"))) {
 cat("Generating the first list of hits...\n")
 df.list <- foreach(i = file.list) %dopar% {
 file.tmp <- fread(file = i, sep = "\t", header = T, select = c(sel.columns))
-file.tmp <- file.tmp[file.tmp[["SYMBOL_SOURCE"]] != "Clone_based_ensembl_gene" & grepl(file.tmp[["IMPACT"]], pattern = "(HIGH|MODERATE)"), , drop = F]
+file.tmp <- file.tmp[file.tmp[["SYMBOL_SOURCE"]] %in% c("EntrezGene", "HGNC") & grepl(file.tmp[["IMPACT"]], pattern = "(HIGH|MODERATE)"), , drop = F]
 file.tmp[["MAX_AF"]][file.tmp[["MAX_AF"]] == "-"] <- -1
 file.tmp}
 names(df.list) <- s.names
@@ -464,43 +529,39 @@ save(list = c("df.full"), file = paste0("../../", runid, ".", antype, ".df.full.
 } else {
   cat("Loading a pre-existing RData file:", paste0("../../", runid, ".", antype, ".df.full.RData...\n"))
   load(paste0("../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
+  read.args()
 }
 if(!is.null(df.full)) {
   
-  if(paired.samples == "TRUE") {csvtable[[sampleid]] <- paste(csvtable[[sampleid]], csvtable[[pair.ind]], sep = "#")}
+  if(paired.samples) {csvtable[[sampleid]] <- paste(csvtable[[sampleid]], csvtable[[pair.ident]], sep = "#")}
   rownames(csvtable) <- csvtable[[sampleid]]
   if(length(csvtable[[sampleid]]) != length(csvtable[[indfactor]])) {stop("Some sample ids or group ids are missing.")}
   
-  if(paired.samples == "TRUE")
-  { anno <- csvtable %>% dplyr::select(indfactor, pair.ind)} else
+  if(paired.samples)
+  { anno <- csvtable %>% dplyr::select(indfactor, pair.ident)} else
   { anno <- csvtable %>% dplyr::select(indfactor)}
   anno <- as.data.frame(sapply(anno, factor))
   rownames(anno) <- rownames(csvtable)
   
-  if(paired.samples == "TRUE") {
-    colnames(anno) <- c(indfactor, pair.ind)
-  } else {
-    colnames(anno) <- c(indfactor)
-  }
-  
   anno.sub <- anno
   rownames(anno.sub) <- sub(rownames(anno.sub), pattern = "#.*$", replacement = "")
   df.full <- as.matrix(merge(x = df.full, y = anno.sub, by.x = "Sample.name", by.y = 0))
-  if(paired.samples) {df.full <- df.full[, colnames(df.full)[c(1,18,19,2:17)]]} else {
-    df.full <- df.full[, colnames(df.full)[c(1,18,2:17)]]}
-  if(nrow(df.full) == 0) {df.full <- NULL}}
+  if(paired.samples) {df.full <- df.full[, colnames(df.full)[c(1,18,19,2:17)], drop = F]} else {
+    df.full <- df.full[, colnames(df.full)[c(1,18,2:17)], drop = F]}
+  if(nrow(df.full) == 0) {df.full <- NULL}
+  }
 
 if(!is.null(df.full)) {
 
 wb <<- createWorkbook()
 
 if(nrow(df.full) <= 2**20) {
-  sheet.name <- substr(paste("All_mutations", sep = "."), 1, 31)
+  sheet.name <- substr(paste("All_variants", sep = "."), 1, 31)
   if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
   addWorksheet(wb = wb, sheetName = sheet.name)
   writeData(x = df.full, wb = wb, sheet = sheet.name) } else {
-  All.mut.name <- paste("VEP_analysis", "all_mutations", prefix, "csv" , sep = ".")
-  write.table(x = df.full, row.names = F, file = All.mut.name, sep = ";")
+  All.var.name <- paste("VEP_analysis", "all_variants", prefix, "csv" , sep = ".")
+  write.table(x = df.full, row.names = F, file = All.var.name, sep = ";")
 }
 
 f.hm <- function(x) {df.tmp <-  x[grepl(x[["IMPACT"]], pattern = impact),]
@@ -509,28 +570,16 @@ if(nrow(df.tmp) > 0) {
 
 for(impact in impacts) {
 impact.name <- paste(sub(sub(unlist(strsplit(impact, split = "\\|")), pattern = "\\(", replacement = ""), pattern = "\\)", replacement = ""), collapse = "_or_")
-New.muts.mx <- df.full[df.full[,"Existing_variation"] == "-", , drop = F]
-New.muts.mx <- New.muts.mx[grepl(New.muts.mx[,"IMPACT", drop = F], pattern = impact), , drop = F]
+New.vars.mx <- df.full[df.full[,"Existing_variation"] == "-", , drop = F]
+New.vars.mx <- New.vars.mx[grepl(New.vars.mx[,"IMPACT", drop = F], pattern = impact), , drop = F]
 
-if(nrow(New.muts.mx) <= 2**20) {
-sheet.name <- substr(paste("New_mutations", "impact", impact.name, sep = "."), 1, 31)
+if(nrow(New.vars.mx) <= 2**20) {
+sheet.name <- substr(paste("New_variants", "impact", impact.name, sep = "."), 1, 31)
 if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
 addWorksheet(wb = wb, sheetName = sheet.name)
-writeData(x = New.muts.mx, wb = wb, sheet = sheet.name) } else {
-New.mut.name <- paste("VEP_analysis", "new_mutations", impact.name, prefix, "csv" , sep = ".")
-write.table(x = New.muts.mx, row.names = F, file = New.mut.name, sep = ";")
-}
-
-if(paired.samples == "TRUE")
-{ anno <- csvtable %>% dplyr::select(indfactor, pair.ind)} else
-{ anno <- csvtable %>% dplyr::select(indfactor)}
-anno <- as.data.frame(sapply(anno, factor))
-rownames(anno) <- rownames(csvtable)
-
-if(paired.samples == "TRUE") {
-  colnames(anno) <- c(indfactor, pair.ind)
-} else {
-  colnames(anno) <- c(indfactor)
+writeData(x = New.vars.mx, wb = wb, sheet = sheet.name) } else {
+New.var.name <- paste("VEP_analysis", "new_variants", impact.name, prefix, "csv" , sep = ".")
+write.table(x = New.vars.mx, row.names = F, file = New.var.name, sep = ";")
 }
 
 df.hm.list <- by(data = df.full, INDICES = list(df.full[,"Sample.name"], df.full[,"SYMBOL"]), FUN=f.hm)
@@ -540,13 +589,10 @@ df.hm.list <- df.hm.list[sapply(df.hm.list, Negate(is.null))]
 geneList <- sort(unique(sub(names(df.hm.list), pattern = "^.*\\$\\$", replacement = "")))
 
 sampleIDs <- s.names
-sampleIDs.fin <- NULL
 for(i in seq(1,length(sampleIDs))) {
-  if(sum(grepl(rownames(anno), pattern = paste0("^", sampleIDs[i], "(#.*)?", "$"))) > 1) {stop(paste(Sample.name, "sample cannot be uniquely identified in the annotation table."))}
-  sampleIDs.fin <- append(sampleIDs.fin, rownames(anno)[grep(rownames(anno), pattern = paste0("^", sampleIDs[i], "(#.*)?", "$"))])}
-sampleIDs <- sub(sampleIDs.fin, pattern = "#.*$", replacement = "")
+  if(sum(grepl(rownames(anno), pattern = paste0("^", sampleIDs[i], "(#.*)?", "$"))) > 1) {stop(paste(sampleIDs[i], "sample cannot be uniquely identified in the annotation table."))}}
 
-res1 <- foreach(gene = geneList, .combine = cbind) %dopar% {foreach(sampleID = sampleIDs, .combine = c) %do% {if(! is.null(df.hm.list[[paste(sampleID, gene, sep = "$$")]])) {nrow(df.hm.list[[paste(sampleID, gene, sep = "$$")]])} else {0}} }
+res1 <- foreach(gene = geneList, .combine = cbind) %:% foreach(sampleID = sampleIDs, .combine = c) %dopar% {if(! is.null(df.hm.list[[paste(sampleID, gene, sep = "$$")]])) {nrow(df.hm.list[[paste(sampleID, gene, sep = "$$")]])} else {0}}
 rm(df.hm.list)
 
 res1 <- as.data.frame(res1)
@@ -564,20 +610,21 @@ anno.short.sample.names[["full.sample.names"]] <- rownames(anno.short.sample.nam
 rownames(anno.short.sample.names) <- sub(rownames(anno), pattern = "#.*$", replacement = "")
 res1.merged <- merge(x = res1, y = anno.short.sample.names, by.x = 0, by.y = 0)
 rownames(res1.merged) <- res1.merged[["Row.names"]]
-if(paired.samples == "TRUE") {
-  res1.merged <- res1.merged[order(res1.merged[[indfactor]], res1.merged[[pair.ind]]),]} else {
+if(paired.samples) {
+  res1.merged <- res1.merged[order(res1.merged[[indfactor]], res1.merged[[pair.ident]]),]} else {
   res1.merged <- res1.merged[order(res1.merged[[indfactor]]),]}
 
-if(paired.samples == "TRUE") {
-  res1 <- res1.merged %>% dplyr::select(-c("Row.names", indfactor, pair.ind, "full.sample.names"))
-  anno.full.names <- res1.merged %>% dplyr::select(indfactor, pair.ind, "full.sample.names")
-  anno <- res1.merged %>% dplyr::select(indfactor, pair.ind)
+if(paired.samples) {
+  res1 <- res1.merged %>% dplyr::select(-c("Row.names", indfactor, pair.ident, "full.sample.names"))
+  anno <- res1.merged %>% dplyr::select(indfactor, pair.ident, "full.sample.names")
+  rownames(anno) <- anno[["full.sample.names"]]
+  anno <- anno %>% dplyr::select(-c("full.sample.names"))
 } else {
   res1 <- res1.merged %>% dplyr::select(-c("Row.names", indfactor, "full.sample.names"))
   anno <- res1.merged %>% dplyr::select(indfactor) }
 
-New.muts.name <- paste("new.muts", antype, groupid, make.names(impact), sep = ".")
-assign(New.muts.name, value = New.muts.mx, envir = .GlobalEnv)
+New.vars.name <- paste("new.vars", antype, groupid, make.names(impact), sep = ".")
+assign(New.vars.name, value = New.vars.mx, envir = .GlobalEnv)
 
 res1.name <- paste("res1", antype, groupid, make.names(impact), sep = ".")
 assign(res1.name, value = res1, envir = .GlobalEnv)
@@ -585,62 +632,68 @@ assign(res1.name, value = res1, envir = .GlobalEnv)
 anno.name <- paste("anno", antype, groupid, make.names(impact), sep = ".")
 assign(anno.name, value = anno, envir = .GlobalEnv)
 
-mut.analysis(data = res1, anno = anno, gene.signature = "ALL_GENES", wb = wb)
+var.analysis(data = res1, anno = anno, gene.signature = "ALL_GENES", wb = wb)
 }
 
-pdf_combine(rev(list.files(pattern = "VEP_analysis.*\\.pdf$")), output = paste("VEP_analyses", "all_genes", prefix, "pdf", sep = "."))
+pdf_combine(rev(list.files(pattern = "VEP_analysis.*\\.pdf$")), output = paste("VEP_analyses", "ALL_GENES", prefix, "pdf", sep = "."))
 unlink(rev(list.files(pattern = "VEP_analysis.*\\.pdf$")))
 
-saveWorkbook(wb, file = paste(prefix, "VEP_analysis.xlsx", sep = "."), overwrite = T)
+saveWorkbook(wb = wb, file = paste(prefix, paste("gene.signature", "ALL_GENES", sep = ":"), "VEP_analysis.xlsx", sep = "."), overwrite = T)
 } else {
+  
+  if(paired.samples) {csvtable[[sampleid]] <- paste(csvtable[[sampleid]], csvtable[[pair.ident]], sep = "#")}
+  rownames(csvtable) <- csvtable[[sampleid]]
+  if(length(csvtable[[sampleid]]) != length(csvtable[[indfactor]])) {stop("Some sample ids or group ids are missing.")}
+  
+  if(paired.samples)
+  { anno <- csvtable %>% dplyr::select(indfactor, pair.ident)} else
+  { anno <- csvtable %>% dplyr::select(indfactor)}
+  anno <- as.data.frame(sapply(anno, factor))
+  rownames(anno) <- rownames(csvtable)
+  
+  for(impact in impacts) {
+  
+  anno.name <- paste("anno", antype, groupid, make.names(impact), sep = ".")
+  assign(anno.name, value = anno, envir = .GlobalEnv)
+  
   res1 <- data.frame(s.names)
   rownames(res1) <- s.names
   res1 <- res1[,-1]
+  res1 <- res1[match(rownames(anno), rownames(res1)), , drop = F]
   
-  for(impact in impacts) {
   res1.name <- paste("res1", antype, groupid, make.names(impact), sep = ".")
   assign(res1.name, value = res1, envir = .GlobalEnv)
   
   res1.bool.name <- paste("res1.bool", antype, groupid, make.names(impact), sep = ".")
   assign(res1.bool.name, value = res1, envir = .GlobalEnv)
   
-  anno <- anno[rownames(anno) == s.names, , drop = F]
-  anno.name <- paste("anno", antype, groupid, make.names(impact), sep = ".")
-  assign(anno.name, value = anno, envir = .GlobalEnv)
+  New.vars.name <- paste("new.vars", antype, groupid, make.names(impact), sep = ".")
+  New.vars.mx <- t(matrix(rep("",18)))[-1,]
+  colnames(New.vars.mx) <- c("Sample.name", "Group", "Gene", "SYMBOL", "SYMBOL_SOURCE", "HGVSg", "HGVSc", "HGVSp", "Cytoband", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
+  assign(New.vars.name, value = New.vars.mx, envir = .GlobalEnv)
   }
-  cat(paste("There are no", antype, "mutations (alterations classified as high or moderate in the Ensembl database) in the current data set.\n\nSample IDs:", paste(s.names, collapse = ", "), "\n"), file = paste("VEP_analyses", "all_genes", prefix, "txt", sep = "."))
+  cat(paste("There are no", antype, "variants (alterations classified as high or moderate in the Ensembl database) in the current data set.\n\nSample IDs:", paste(rownames(res1), collapse = ", "), "\n"), file = paste("VEP_analyses", "ALL_GENES", prefix, "txt", sep = "."))
 }
 save.image(file = paste(prefix, "VEP_analysis.final.RData", sep = "."))
 } else {
+  cat("There are no matching CSV files with VEP results to be processed.\nPlease, check if the corresponding", BAM.type, "and VCF files are present.\n", file = "Warning.no.vcfs.txt")
+}
+} else {
   cat("Loading a pre-existing RData file:", paste(prefix, "VEP_analysis.final.RData...\n", sep = "."))
-  load(paste(prefix, "VEP_analysis.final.RData", sep = "."), envir = .GlobalEnv)}
-
-library(doMC)
-library(foreach)
-library(dplyr)
-library(tidyr)
-library(matrixStats)
-library(pheatmap)
-library(RColorBrewer)
-library(ggplot2)
-library(pals)
-library(openxlsx)
-library(data.table)
-library(pdftools)
-library(ggfortify)
-library(limma)
-
-registerDoMC(threads)
+  load(paste(prefix, "VEP_analysis.final.RData", sep = "."), envir = .GlobalEnv)
+  read.args()}
+if(! file.exists("Warning.no.vcfs.txt")) {
 
 if(txt.file != "NA") {
   con <- file(txt.file)
-  gene.list1 <- readLines(con)
+  gene.list1 <- unique(gsub(readLines(con), pattern = "\\s", replacement = ""))
   close(con)
   wb2 <<- createWorkbook()
 
   gene.list1.conv <- NULL
   for(i in gene.list1) {if(length(alias2Symbol(i, species = "Hs")) == 0) {gene.list1.conv <- append(gene.list1.conv, values = i)} else {gene.list1.conv <- append(gene.list1.conv, values = alias2Symbol(i, species = "Hs"))}}
-
+  gene.list1.conv <- unique(gene.list1.conv)
+  
   for(impact in impacts) {
       impact.name <- paste(sub(sub(unlist(strsplit(impact, split = "\\|")), pattern = "\\(", replacement = ""), pattern = "\\)", replacement = ""), collapse = "_or_")
       res1.name <- paste("res1", antype, groupid, make.names(impact), sep = ".")
@@ -650,10 +703,10 @@ if(txt.file != "NA") {
       anno <- get(anno.name)
       
       if(ncol(res1.sel) > 0 & nrow(res1.sel) > 0) {
-      mut.analysis(data = res1.sel, anno = anno, gene.signature = gene.signature, gene.list1.conv = gene.list1.conv, wb = wb2)
+      var.analysis(data = res1.sel, anno = anno, gene.signature = gene.signature, gene.list1.conv = gene.list1.conv, wb = wb2)
       } else {
-        sheet.name <- substr(paste("Mut.per.gene.impact",impact.name, sep = "."), 1, 31)
-        if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
+        sheet.name <- substr(paste("Var.per.gene.impact",impact.name, sep = "."), 1, 31)
+        if(length(wb2$sheet_names) > 0) {if(sheet.name %in% wb2$sheet_names) {removeWorksheet(wb2, sheet = sheet.name)}}
         addWorksheet(wb = wb2, sheetName = sheet.name)
         writeData(wb = wb2, sheet = sheet.name, x = c("No genes with genetic alterations have been found."))
       }}
@@ -662,11 +715,13 @@ if(txt.file != "NA") {
   pdf_combine(pdffiles, output = paste("VEP_analyses", paste0("gene.signature:", gene.signature), prefix, "pdf", sep = "."))
   unlink(pdffiles)} else {
   pdf(file = paste("VEP_analyses", paste0("gene.signature:", gene.signature), prefix, "pdf", sep = "."), width = 18)
-    plot.new() + plot.window(xlim=c(-5,5), ylim=c(-5,5)); title(paste(main="INFO: At least two genes contained in the", gene.signature, "signature have to harbor", antype, "mutations (impact high or moderate) for the analysis to succeed."))
+    plot.new() + plot.window(xlim=c(-5,5), ylim=c(-5,5)); title(paste(main="INFO: At least two genes contained in the", gene.signature, "signature have to harbor", antype, "variants (impact high or moderate) for the analysis to succeed."))
     dev.off()
   }
-  saveWorkbook(wb = wb2, file = paste(prefix, gene.signature, "VEP_analysis.xlsx", sep = "."), overwrite = T)
+  saveWorkbook(wb = wb2, file = paste(prefix, paste("gene.signature", gene.signature, sep = ":"), "VEP_analysis.xlsx", sep = "."), overwrite = T)
   }
+save.image(file = paste(prefix, "VEP_analysis.final.RData", sep = "."))
+}
 }
 
 if(any(grouping.cols != "ALL_SAMPLES")) {
@@ -692,5 +747,6 @@ if(any(grouping.cols != "ALL_SAMPLES")) {
 
 sessionInfo()
 proc.time()
+date()
 
 cat("All done.\n")
