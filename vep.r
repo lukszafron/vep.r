@@ -23,8 +23,8 @@ read.args()
 genome.ver <- grep(unlist(strsplit(arguments[1], split = "/")), pattern = "\\.genome", value = T)
 
 if(grepl(arguments[1], pattern = "BAMs_wo_dups"))
-{dups <- FALSE; csv.pat <- "\\.sorted\\.no_dups_VEP\\.(SNP|NON_SNP)\\.csv$"} else if(grepl(arguments[1], pattern = "BAMs_w_dups")) 
-{dups <- TRUE; csv.pat <- "\\.sorted_VEP\\.(SNP|NON_SNP)\\.csv$"} else {stop("The duplication status cannot be determined.")}
+{dups <- FALSE; csv.pat <- "_sorted\\.no_dups_VEP\\.(SNP|NON_SNP)\\.csv$"} else if(grepl(arguments[1], pattern = "BAMs_w_dups")) 
+{dups <- TRUE; csv.pat <- "_sorted_VEP\\.(SNP|NON_SNP)\\.csv$"} else {stop("The duplication status cannot be determined.")}
 if(dups) {BAM.type <- "BAM files with duplicates"} else {BAM.type <- "BAM files without duplicates"}
 
 if(grepl(genome.ver, pattern = "hg38|GRCh38")) {genome <- "hg38"} else
