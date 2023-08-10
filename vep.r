@@ -536,7 +536,7 @@ df.full <- foreach(Sample.name = s.names, .combine = rbind) %dopar% {
     df.hit <- df.tmp[df.tmp[,c("SYMBOL","HGVSg","IMPACT"), drop = F] %>% unite(col = "United", sep = " ") == hit, , drop = F]
     df.hit[which.min(rowSums(df.hit == "-")), , drop = F]}
   
-  df.tmp <- df.tmp[ !grepl(df.tmp[["SIFT"]], pattern = "(tolerated|-)") | !grepl(df.tmp[["PolyPhen"]], pattern = "(benign|-)") | !grepl(df.tmp[["CLIN_SIG"]], pattern = "(benign|-)") | as.numeric(df.tmp[["MAX_AF"]]) < 0.01, , drop = F]
+  df.tmp <- df.tmp[ !grepl(df.tmp[["SIFT"]], pattern = "(tolerated|-)") | !grepl(df.tmp[["PolyPhen"]], pattern = "(benign|-|unknown)") | !grepl(df.tmp[["CLIN_SIG"]], pattern = "(benign|-|^not_provided$|^protective$)") | as.numeric(df.tmp[["MAX_AF"]]) < 0.01, , drop = F]
   df.tmp[["MAX_AF"]][df.tmp[["MAX_AF"]] == "-1"] <- "-"
   df.tmp
    }}
