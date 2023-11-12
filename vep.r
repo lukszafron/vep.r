@@ -5,7 +5,7 @@ arguments <- commandArgs(trailingOnly = TRUE)
 
 if(length(arguments) != 10) {stop("This program requires ten arguments.
                                   The first one is the destination folder,
-                                  the second one is a semicolon-delimited CSV file with sample names and grouping variables,
+                                  the second one is a semicolon-delimited CSV file with sample names and other necessary clinical variables,
                                   the third determines the sample ID variable,
                                   the fourth - grouping variable,
                                   the fifth - independent factor,
@@ -473,14 +473,14 @@ s.names <- gsub(s.names, pattern = "#", replacement = ".")
 
 if(length(file.list) >0) {
 
-sel.columns <- c("Gene", "SYMBOL", "SYMBOL_SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
+sel.columns <- c("Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
 
 if(!file.exists(paste0("../../", runid, ".", antype, ".df.full.RData"))) {
 
 cat("Generating the first list of hits...\n")
 df.list <- foreach(i = file.list) %dopar% {
 file.tmp <- fread(file = i, sep = "\t", header = T, select = c(sel.columns))
-file.tmp <- file.tmp[file.tmp[["SYMBOL_SOURCE"]] %in% c("EntrezGene", "HGNC") & grepl(file.tmp[["IMPACT"]], pattern = "(HIGH|MODERATE)"), , drop = F]
+file.tmp <- file.tmp[file.tmp[["SOURCE"]] %in% c("RefSeq", "Ensembl") & grepl(file.tmp[["IMPACT"]], pattern = "(HIGH|MODERATE)"), , drop = F]
 file.tmp[["MAX_AF"]][file.tmp[["MAX_AF"]] == "-"] <- -1
 file.tmp}
 names(df.list) <- s.names
@@ -701,7 +701,7 @@ saveWorkbook(wb = wb, file = paste(prefix, paste("gene.signature", "ALL_GENES", 
   
   New.vars.name <- paste("new.vars", antype, groupid, make.names(impact), sep = ".")
   New.vars.mx <- t(matrix(rep("",18)))[-1,]
-  colnames(New.vars.mx) <- c("Sample.name", "Group", "Gene", "SYMBOL", "SYMBOL_SOURCE", "HGVSg", "HGVSc", "HGVSp", "Cytoband", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
+  colnames(New.vars.mx) <- c("Sample.name", "Group", "Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Cytoband", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
   assign(New.vars.name, value = New.vars.mx, envir = .GlobalEnv)
   }
   cat(paste("There are no", antype, "variants (alterations classified as high or moderate in the Ensembl database) in the current data set.\n\nSample IDs:", paste(rownames(res1), collapse = ", "), "\n"), file = paste("VEP_analyses", "ALL_GENES", prefix, "txt", sep = "."))
