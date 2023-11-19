@@ -60,6 +60,7 @@ library(openxlsx)
 library(pdftools)
 library(ggfortify)
 library(limma)
+library(tibble)
 
 registerDoMC(threads)
 
@@ -212,7 +213,7 @@ var.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       sheet.name <- substr(paste("Var.per.gene.impact",impact.name, sep = "."), 1, 31)
       if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
       addWorksheet(wb = wb, sheetName = sheet.name)
-      writeData(x = all.groups, wb = wb, sheet = sheet.name, rowNames = F)
+      writeData(x = all.groups, wb = wb, sheet = sheet.name, rowNames = F, keepNA = TRUE, na.string = "NA")
       
       vars.per.gene.name <- paste("vars.per.gene", antype, make.names(impact), sep = ".")
       assign(vars.per.gene.name, value = all.groups)
@@ -274,7 +275,7 @@ var.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
       sheet.name <- substr(paste("Heatmap", "impact", impact.name, sep = "."), 1, 31)
       if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
       addWorksheet(wb = wb, sheetName = sheet.name)
-      writeData(x = data.t, wb = wb, sheet = sheet.name, rowNames = T)
+      writeData(x = data.t, wb = wb, sheet = sheet.name, rowNames = T, keepNA = TRUE, na.string = "NA")
     }
     wb.name <- as.character(sys.call()[["wb"]])
     assign(x = wb.name, value = wb, envir = .GlobalEnv)
@@ -454,7 +455,9 @@ workdir <- paste0(arguments[1], "/Summary", "/Grouping_variables:", arguments[4]
 
 runid <- sub(sub(workdir, pattern = "^.*RUNS/", replacement = ""), pattern = "/MAPPINGS.*$", replacement = "")
 antype <- sub(sub(workdir, pattern = "\\/Summary\\/.*", replacement = ""), pattern = "^.*\\/", replacement = "")
-impacts <- c("HIGH", "(HIGH|MODERATE)")
+
+# By modyfing the line below, one can difine what type(s) of genetic variants should be included in the analysis (impacts "HIGH", "MODERATE" or both). 
+impacts <- c("HIGH", "MODERATE", "(HIGH|MODERATE)")
 
 dir.create(workdir, recursive = T)
 gene.signature <- gsub(txt.file, pattern = "^.*\\/", replacement = "")
@@ -471,9 +474,9 @@ file.list <- file.list[sapply(file.list, file.size) > 0]
 s.names <- sub(file.list, pattern = paste0("(\\.\\.\\/\\.\\.\\/\\.\\.\\/)(.*)", paste0("(", csv.pat, ")")), replacement = "\\2")
 s.names <- gsub(s.names, pattern = "#", replacement = ".")
 
-if(length(file.list) >0) {
+if(length(file.list) > 0) {
 
-sel.columns <- c("Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
+sel.columns <- c("Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "CANONICAL", "IMPACT")
 
 if(!file.exists(paste0("../../", runid, ".", antype, ".df.full.RData"))) {
 
@@ -534,12 +537,17 @@ df.full <- foreach(Sample.name = s.names, .combine = rbind) %dopar% {
   
     df.tmp <- foreach(hit = hits, .combine = rbind) %do% {
     df.hit <- df.tmp[df.tmp[,c("SYMBOL","HGVSg","IMPACT"), drop = F] %>% unite(col = "United", sep = " ") == hit, , drop = F]
-    df.hit[which.min(rowSums(df.hit == "-")), , drop = F]}
+    if(any(df.hit[["CANONICAL"]] == "YES")) {
+    df.hit <- subset(df.hit, subset = CANONICAL == "YES")
+    }
+    df.hit[which.min(rowSums(df.hit == "-")), , drop = F]
+    }
   
   df.tmp <- df.tmp[ !grepl(df.tmp[["SIFT"]], pattern = "(tolerated|-)") | !grepl(df.tmp[["PolyPhen"]], pattern = "(benign|-|unknown)") | !grepl(df.tmp[["CLIN_SIG"]], pattern = "(benign|-|^not_provided$|^protective$)") | as.numeric(df.tmp[["MAX_AF"]]) < 0.01, , drop = F]
   df.tmp[["MAX_AF"]][df.tmp[["MAX_AF"]] == "-1"] <- "-"
   df.tmp
-   }}
+   }
+  }
 
 f.cytoband <- function(x) {
   chromosome <- stri_extract(stri_extract(str = x, regex = "^chr[0-9MXY]+"), regex = "[0-9MXY]+")
@@ -549,7 +557,7 @@ f.cytoband <- function(x) {
 }
 
 Cytoband <- foreach(loc = df.full[,"HGVSg"], .combine = c) %dopar% {f.cytoband(loc)}
-df.full <- cbind(df.full, Cytoband)[,c(1:7,17,8:16)]
+df.full <- df.full %>% add_column(Cytoband, .after = "HGVSp")
 
 rm(df.list)
 
@@ -562,8 +570,7 @@ save(list = c("df.full"), file = paste0("../../", runid, ".", antype, ".df.full.
   load(paste0("../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
   read.args()
 }
-if(!is.null(df.full)) {
-  
+f_df.full_annotate <<- function(df.full) {
   if(paired.samples) {csvtable[[sampleid]] <- paste(csvtable[[sampleid]], csvtable[[pair.ident]], sep = "#")}
   rownames(csvtable) <- csvtable[[sampleid]]
   if(length(csvtable[[sampleid]]) != length(csvtable[[indfactor]])) {stop("Some sample ids or group ids are missing.")}
@@ -573,13 +580,18 @@ if(!is.null(df.full)) {
   { anno <- csvtable %>% dplyr::select(indfactor)}
   anno <- as.data.frame(sapply(anno, factor))
   rownames(anno) <- rownames(csvtable)
-  
   anno.sub <- anno
   rownames(anno.sub) <- sub(rownames(anno.sub), pattern = "#.*$", replacement = "")
   df.full <- as.matrix(merge(x = df.full, y = anno.sub, by.x = "Sample.name", by.y = 0))
-  if(paired.samples) {df.full <- df.full[, colnames(df.full)[c(1,18,19,2:17)], drop = F]} else {
-    df.full <- df.full[, colnames(df.full)[c(1,18,2:17)], drop = F]}
+  if(paired.samples) {df.full <- df.full[, colnames(df.full)[c(1,19,20,2:18)], drop = F]} else {
+    df.full <- df.full[, colnames(df.full)[c(1,19,2:18)], drop = F]}
   if(nrow(df.full) == 0) {df.full <- NULL}
+  return(list(df.full = df.full, anno = anno))
+}
+if(!is.null(df.full)) {
+  df.full.anno.list <- f_df.full_annotate(df.full)
+  df.full <- df.full.anno.list[["df.full"]]
+  anno <- df.full.anno.list[["anno"]]
   }
 
 if(!is.null(df.full)) {
@@ -590,7 +602,7 @@ if(nrow(df.full) <= 2**20) {
   sheet.name <- substr(paste("All_variants", sep = "."), 1, 31)
   if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
   addWorksheet(wb = wb, sheetName = sheet.name)
-  writeData(x = df.full, wb = wb, sheet = sheet.name) } else {
+  writeData(x = df.full, wb = wb, sheet = sheet.name, keepNA = TRUE, na.string = "NA") } else {
   All.var.name <- paste("VEP_analysis", "all_variants", prefix, "csv" , sep = ".")
   write.table(x = df.full, row.names = F, file = All.var.name, sep = ";")
 }
@@ -608,7 +620,7 @@ if(nrow(New.vars.mx) <= 2**20) {
 sheet.name <- substr(paste("New_variants", "impact", impact.name, sep = "."), 1, 31)
 if(length(wb$sheet_names) > 0) {if(sheet.name %in% wb$sheet_names) {removeWorksheet(wb, sheet = sheet.name)}}
 addWorksheet(wb = wb, sheetName = sheet.name)
-writeData(x = New.vars.mx, wb = wb, sheet = sheet.name) } else {
+writeData(x = New.vars.mx, wb = wb, sheet = sheet.name, keepNA = TRUE, na.string = "NA") } else {
 New.var.name <- paste("VEP_analysis", "new_variants", impact.name, prefix, "csv" , sep = ".")
 write.table(x = New.vars.mx, row.names = F, file = New.var.name, sep = ";")
 }
@@ -621,9 +633,15 @@ geneList <- sort(unique(sub(names(df.hm.list), pattern = "^.*\\$\\$", replacemen
 
 sampleIDs <- s.names
 for(i in seq(1,length(sampleIDs))) {
-  if(sum(grepl(rownames(anno), pattern = paste0("^", sampleIDs[i], "(#.*)?", "$"))) > 1) {stop(paste(sampleIDs[i], "sample cannot be uniquely identified in the annotation table."))}}
+  if(sum(grepl(rownames(anno), pattern = paste0("^", sampleIDs[i], "(#.*)?", "$"))) > 1) {stop(paste(sampleIDs[i], "sample cannot be uniquely identified in the annotation table."))}
+  }
 
-res1 <- foreach(gene = geneList, .combine = cbind) %:% foreach(sampleID = sampleIDs, .combine = c) %dopar% {if(! is.null(df.hm.list[[paste(sampleID, gene, sep = "$$")]])) {nrow(df.hm.list[[paste(sampleID, gene, sep = "$$")]])} else {0}}
+res1 <- foreach(gene = geneList, .combine = cbind) %:% 
+foreach(sampleID = sampleIDs, .combine = c) %dopar% {
+  if(! is.null(df.hm.list[[paste(sampleID, gene, sep = "$$")]])) {
+    as.matrix(nrow(df.hm.list[[paste(sampleID, gene, sep = "$$")]]))} else {
+      as.matrix(0)}}
+
 rm(df.hm.list)
 
 res1 <- as.data.frame(res1)
@@ -642,8 +660,8 @@ rownames(anno.short.sample.names) <- sub(rownames(anno), pattern = "#.*$", repla
 res1.merged <- merge(x = res1, y = anno.short.sample.names, by.x = 0, by.y = 0)
 rownames(res1.merged) <- res1.merged[["Row.names"]]
 if(paired.samples) {
-  res1.merged <- res1.merged[order(res1.merged[[indfactor]], res1.merged[[pair.ident]]),]} else {
-  res1.merged <- res1.merged[order(res1.merged[[indfactor]]),]}
+  res1.merged <- res1.merged[order(res1.merged[[indfactor]], res1.merged[[pair.ident]]),, drop = F]} else {
+  res1.merged <- res1.merged[order(res1.merged[[indfactor]]),, drop = F]}
 
 if(paired.samples) {
   res1 <- res1.merged %>% dplyr::select(-c("Row.names", indfactor, pair.ident, "full.sample.names"))
@@ -668,7 +686,7 @@ f_TOST(data = res1, anno = anno, gene.signature = "ALL_GENES")
 }
 
 pdf_combine(rev(list.files(pattern = "VEP_analysis.*\\.pdf$")), output = paste("VEP_analyses", "ALL_GENES", prefix, "pdf", sep = "."))
-unlink(rev(list.files(pattern = "VEP_analysis.*\\.pdf$")))
+unlink(list.files(pattern = "VEP_analysis.*\\.pdf$"))
 
 saveWorkbook(wb = wb, file = paste(prefix, paste("gene.signature", "ALL_GENES", sep = ":"), "VEP_analysis.xlsx", sep = "."), overwrite = T)
 } else {
@@ -682,7 +700,11 @@ saveWorkbook(wb = wb, file = paste(prefix, paste("gene.signature", "ALL_GENES", 
   { anno <- csvtable %>% dplyr::select(indfactor)}
   anno <- as.data.frame(sapply(anno, factor))
   rownames(anno) <- rownames(csvtable)
-  
+  anno <- anno[sub(rownames(anno), pattern = "#.*$", replacement = "") %in% s.names, , drop = F]
+  if(paired.samples) {
+      anno <- anno[order(anno[[indfactor]], anno[[pair.ident]]),, drop = F]} else {
+      anno <- anno[order(anno[[indfactor]]),, drop = F]}
+
   for(impact in impacts) {
   
   anno.name <- paste("anno", antype, groupid, make.names(impact), sep = ".")
@@ -700,8 +722,8 @@ saveWorkbook(wb = wb, file = paste(prefix, paste("gene.signature", "ALL_GENES", 
   assign(res1.bool.name, value = res1, envir = .GlobalEnv)
   
   New.vars.name <- paste("new.vars", antype, groupid, make.names(impact), sep = ".")
-  New.vars.mx <- t(matrix(rep("",18)))[-1,]
-  colnames(New.vars.mx) <- c("Sample.name", "Group", "Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Cytoband", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "IMPACT")
+  New.vars.mx <- t(matrix(rep("",19)))[-1,]
+  colnames(New.vars.mx) <- c("Sample.name", "Group", "Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Cytoband", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "CANONICAL", "IMPACT")
   assign(New.vars.name, value = New.vars.mx, envir = .GlobalEnv)
   }
   cat(paste("There are no", antype, "variants (alterations classified as high or moderate in the Ensembl database) in the current data set.\n\nSample IDs:", paste(rownames(res1), collapse = ", "), "\n"), file = paste("VEP_analyses", "ALL_GENES", prefix, "txt", sep = "."))
@@ -740,29 +762,16 @@ if(txt.file != "NA") {
   cat("Loading a pre-existing RData file:", paste0("../../", runid, ".", antype, ".df.full.RData...\n"))
   load(paste0("../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
   read.args()
-  
-  if(!is.null(df.full)) {
-    
-    if(paired.samples) {csvtable[[sampleid]] <- paste(csvtable[[sampleid]], csvtable[[pair.ident]], sep = "#")}
-    rownames(csvtable) <- csvtable[[sampleid]]
-    if(length(csvtable[[sampleid]]) != length(csvtable[[indfactor]])) {stop("Some sample ids or group ids are missing.")}
-    
-    if(paired.samples)
-    { anno <- csvtable %>% dplyr::select(indfactor, pair.ident)} else
-    { anno <- csvtable %>% dplyr::select(indfactor)}
-    anno <- as.data.frame(sapply(anno, factor))
-    rownames(anno) <- rownames(csvtable)
-    
-    anno.sub <- anno
-    rownames(anno.sub) <- sub(rownames(anno.sub), pattern = "#.*$", replacement = "")
-    df.full <- as.matrix(merge(x = df.full, y = anno.sub, by.x = "Sample.name", by.y = 0))
-    if(paired.samples) {df.full <- df.full[, colnames(df.full)[c(1,18,19,2:17)], drop = F]} else {
-      df.full <- df.full[, colnames(df.full)[c(1,18,2:17)], drop = F]}
-    df.full <- df.full[df.full[,"SYMBOL"] %in% gene.list1.conv, , drop = F]
-    if(nrow(df.full) == 0) {df.full <- NULL}
+
+if(!is.null(df.full)) {
+  if(indfactor != colnames(df.full)[2]) {
+    df.full.anno.list <- f_df.full_annotate(df.full)
+    df.full <- df.full.anno.list[["df.full"]]
+    anno <- df.full.anno.list[["anno"]]
   }
-  
+}
   if(!is.null(df.full)) {
+    df.full <- df.full[df.full[,"SYMBOL"] %in% gene.list1.conv, , drop = F]
     
     wb2 <<- createWorkbook()
     
@@ -770,7 +779,7 @@ if(txt.file != "NA") {
       sheet.name <- substr(paste("All_variants", sep = "."), 1, 31)
       if(length(wb2$sheet_names) > 0) {if(sheet.name %in% wb2$sheet_names) {removeWorksheet(wb2, sheet = sheet.name)}}
       addWorksheet(wb = wb2, sheetName = sheet.name)
-      writeData(x = df.full, wb = wb2, sheet = sheet.name) } else {
+      writeData(x = df.full, wb = wb2, sheet = sheet.name, keepNA = TRUE, na.string = "NA") } else {
         All.var.name <- paste("VEP_analysis", "all_variants", paste("gene_signature", gene.signature, sep = ":"), prefix, "csv" , sep = ".")
         write.table(x = df.full, row.names = F, file = All.var.name, sep = ";")
       }
@@ -785,7 +794,7 @@ if(txt.file != "NA") {
       sheet.name <- substr(paste("New_variants", "impact", impact.name, sep = "."), 1, 31)
       if(length(wb2$sheet_names) > 0) {if(sheet.name %in% wb2$sheet_names) {removeWorksheet(wb2, sheet = sheet.name)}}
       addWorksheet(wb = wb2, sheetName = sheet.name)
-      writeData(x = New.vars.mx, wb = wb2, sheet = sheet.name) } else {
+      writeData(x = New.vars.mx, wb = wb2, sheet = sheet.name, keepNA = TRUE, na.string = "NA") } else {
         New.var.name <- paste("VEP_analysis", "new_variants", impact.name, paste("gene_signature", gene.signature, sep = ":"), prefix, "csv" , sep = ".")
         write.table(x = New.vars.mx, row.names = F, file = New.var.name, sep = ";")
       }
@@ -814,7 +823,8 @@ if(txt.file != "NA") {
     dev.off()
   }
   saveWorkbook(wb = wb2, file = paste(prefix, paste("gene.signature", gene.signature, sep = ":"), "VEP_analysis.xlsx", sep = "."), overwrite = T)
-  }}
+  }
+}
 save.image(file = paste(prefix, "VEP_analysis.final.RData", sep = "."))
 }
 }
