@@ -3,43 +3,45 @@ cat("Program path:", unlist(strsplit(grep(commandArgs(), pattern = "file=", valu
 
 arguments <- commandArgs(trailingOnly = TRUE)
 
-if(length(arguments) != 10) {stop("This program requires ten arguments.
-                                  The first one is the destination folder,
-                                  the second one is a semicolon-delimited CSV file with sample names and other necessary clinical variables,
-                                  the third determines the sample ID variable,
-                                  the fourth - grouping variable,
-                                  the fifth - independent factor,
-                                  the sixth - file with a gene list (one gene per line) to calculate the gene signature,
-                                  the seventh is the number of threads to use,
-                                  the eighth says if samples are paired,
-                                  the ninth determines the column with pair indicators,
-                                  while the tenth is a logical indicator determining if the FDR correction should be applied in the TOST analysis of equivalence.")}
+if(length(arguments) != 11) {stop("This program requires eleven arguments.
+                                  The first one is a folder where VEP results for each sample are stored (for SNP and non-SNP results, it has to be names 'SNP' and 'NON_SNP', respectively),
+                                  The second one is a destination folder,
+                                  the third one is a semicolon-delimited CSV file with sample names and other necessary clinical variables,
+                                  the fourth determines the sample ID variable,
+                                  the fifth - grouping variable,
+                                  the sixth - independent factor,
+                                  the seventh - a path to the file with a gene list (one gene per line) to calculate the gene signature,
+                                  the eighth is the number of threads to use,
+                                  the ninth says if samples are paired,
+                                  the tenth determines the column with pair indicators,
+                                  while the eleventh is a logical indicator determining if the FDR correction should be applied in the TOST analysis of equivalence.")}
 arguments
 arguments.backup <- arguments
 
 read.args <- function() {
-csvfile <<- arguments[2]
-sampleid <<- arguments[3]
-grouping.cols <<- unlist(strsplit(arguments[4], split = "\\,"))
-indfactor <<- arguments[5]
-txt.file <<- arguments[6]
-threads <<- as.numeric(arguments[7])
-paired.samples <<- as.logical(arguments[8])
-pair.ident <<- arguments[9]
-FDR <<- as.logical(arguments[10])
+vep.dir <<- arguments[1]
+genome.ver <<- grep(unlist(strsplit(vep.dir, split = "/")), pattern = "\\.genome", value = T)
+if(grepl(genome.ver, pattern = "hg38|GRCh38")) {genome <<- "hg38"} else
+if(grepl(genome.ver, pattern = "hg19|GRCh37")) {genome <<- "hg19"} else 
+  {stop("The genome version is invalid.")}
+
+if(grepl(vep.dir, pattern = "BAMs_wo_dups"))
+{dups <<- FALSE; csv.pat <<- "_sorted\\.no_dups_VEP\\.(SNP|NON_SNP)\\.csv$"} else if(grepl(vep.dir, pattern = "BAMs_w_dups")) 
+{dups <<- TRUE; csv.pat <<- "_sorted_VEP\\.(SNP|NON_SNP)\\.csv$"} else {stop("The duplication status cannot be determined.")}
+if(dups) {BAM.type <<- "BAM files with duplicates"} else {BAM.type <<- "BAM files without duplicates"}
+
+workdir <<- arguments[2]
+csvfile <<- arguments[3]
+sampleid <<- arguments[4]
+grouping.cols <<- unlist(strsplit(arguments[5], split = "\\,"))
+indfactor <<- arguments[6]
+txt.file <<- arguments[7]
+threads <<- as.numeric(arguments[8])
+paired.samples <<- as.logical(arguments[9])
+pair.ident <<- arguments[10]
+FDR <<- as.logical(arguments[11])
 }
 read.args()
-
-genome.ver <- grep(unlist(strsplit(arguments[1], split = "/")), pattern = "\\.genome", value = T)
-
-if(grepl(arguments[1], pattern = "BAMs_wo_dups"))
-{dups <- FALSE; csv.pat <- "_sorted\\.no_dups_VEP\\.(SNP|NON_SNP)\\.csv$"} else if(grepl(arguments[1], pattern = "BAMs_w_dups")) 
-{dups <- TRUE; csv.pat <- "_sorted_VEP\\.(SNP|NON_SNP)\\.csv$"} else {stop("The duplication status cannot be determined.")}
-if(dups) {BAM.type <- "BAM files with duplicates"} else {BAM.type <- "BAM files without duplicates"}
-
-if(grepl(genome.ver, pattern = "hg38|GRCh38")) {genome <- "hg38"} else
-if(grepl(genome.ver, pattern = "hg19|GRCh37")) {genome <- "hg19"} else 
-  {stop("The genome version is invalid.")}
 
 library(doMC)
 library(foreach)
@@ -283,6 +285,7 @@ var.analysis <- function(data, anno, gene.signature, gene.list1.conv = NA, wb) {
 f_TOST <- function(data, anno, gene.signature) {
   if(ncol(data) > 0) {
     if(length(levels(anno[[indfactor]])) >1) {
+      cat("Performing the TOST analysis...\n")
       gene.signature.xlsx.name <- paste(prefix, "impact", impact.name, paste("gene.signature", gene.signature, sep = ":"), paste("FDR", FDR, sep = ":"), "comparison_summary.xlsx", sep = ".")
       
       wb3 <- createWorkbook()
@@ -451,10 +454,11 @@ f_TOST <- function(data, anno, gene.signature) {
   }
 }
 
-workdir <- paste0(arguments[1], "/Summary", "/Grouping_variables:", arguments[4], "/Factor:", indfactor)
-
-runid <- sub(sub(workdir, pattern = "^.*RUNS/", replacement = ""), pattern = "/MAPPINGS.*$", replacement = "")
-antype <- sub(sub(workdir, pattern = "\\/Summary\\/.*", replacement = ""), pattern = "^.*\\/", replacement = "")
+runid <- sub(sub(vep.dir, pattern = "^.*RUNS/", replacement = ""), pattern = "/MAPPINGS.*$", replacement = "")
+antype <- basename(vep.dir)
+if(! antype %in% c("SNP", "NON_SNP")) {
+  stop("The folders containing VEP results for SNP and non-SNP variants have to be named 'SNP' and 'NON_SNP', respectively.")
+  }
 
 # By modyfing the line below, one can difine what type(s) of genetic variants should be included in the analysis (impacts "HIGH", "MODERATE" or both). 
 impacts <- c("HIGH", "MODERATE", "(HIGH|MODERATE)")
@@ -468,17 +472,17 @@ save.image(file = paste(prefix, "VEP_analysis.initial.RData", sep = "."))
 
 if(! file.exists(paste(prefix, "VEP_analysis.final.RData", sep = "."))) {
 
-file.list <- list.files("../../..", pattern = csv.pat, full.names = T)
+file.list <- list.files(vep.dir, pattern = csv.pat, full.names = T)
 # Exclude empty csv files 
 file.list <- file.list[sapply(file.list, file.size) > 0]
-s.names <- sub(file.list, pattern = paste0("(\\.\\.\\/\\.\\.\\/\\.\\.\\/)(.*)", paste0("(", csv.pat, ")")), replacement = "\\2")
+s.names <- sub(basename(file.list), pattern = paste0("(^.*)" ,"(", csv.pat, ")"), replacement = "\\1")
 s.names <- gsub(s.names, pattern = "#", replacement = ".")
 
 if(length(file.list) > 0) {
 
 sel.columns <- c("Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "CANONICAL", "IMPACT")
 
-if(!file.exists(paste0("../../", runid, ".", antype, ".df.full.RData"))) {
+if(!file.exists(paste0("../../../../../", runid, ".", antype, ".df.full.RData"))) {
 
 cat("Generating the first list of hits...\n")
 df.list <- foreach(i = file.list) %dopar% {
@@ -564,12 +568,13 @@ rm(df.list)
 if(!is.null(df.full)) {
 df.full <- as.matrix(df.full[with(df.full, order(Sample.name, SYMBOL, IMPACT)),])
 }
-save(list = c("df.full"), file = paste0("../../", runid, ".", antype, ".df.full.RData"))
+save(list = c("df.full"), file = paste0("../../../../../", runid, ".", antype, ".df.full.RData"))
 } else {
-  cat("Loading a pre-existing RData file:", paste0("../../", runid, ".", antype, ".df.full.RData...\n"))
-  load(paste0("../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
+  cat("Loading a pre-existing RData file:", paste0("../../../../../", runid, ".", antype, ".df.full.RData...\n"))
+  load(paste0("../../../../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
   read.args()
 }
+
 f_df.full_annotate <<- function(df.full) {
   if(paired.samples) {csvtable[[sampleid]] <- paste(csvtable[[sampleid]], csvtable[[pair.ident]], sep = "#")}
   rownames(csvtable) <- csvtable[[sampleid]]
@@ -578,7 +583,7 @@ f_df.full_annotate <<- function(df.full) {
   if(paired.samples)
   { anno <- csvtable %>% dplyr::select(indfactor, pair.ident)} else
   { anno <- csvtable %>% dplyr::select(indfactor)}
-  anno <- as.data.frame(sapply(anno, factor))
+  anno <- anno %>% mutate(across(.fns = factor)) %>% as.data.frame()                                                                                                         
   rownames(anno) <- rownames(csvtable)
   anno.sub <- anno
   rownames(anno.sub) <- sub(rownames(anno.sub), pattern = "#.*$", replacement = "")
@@ -589,12 +594,14 @@ f_df.full_annotate <<- function(df.full) {
   return(list(df.full = df.full, anno = anno))
 }
 if(!is.null(df.full)) {
+  cat("Merging VEP data with clinical data...\n")
   df.full.anno.list <- f_df.full_annotate(df.full)
   df.full <- df.full.anno.list[["df.full"]]
   anno <- df.full.anno.list[["anno"]]
   }
 
 if(!is.null(df.full)) {
+  cat("Writing the VEP analysis results to a spreadsheet...\n")
 
 wb <<- createWorkbook()
 
@@ -698,7 +705,7 @@ saveWorkbook(wb = wb, file = paste(prefix, paste("gene.signature", "ALL_GENES", 
   if(paired.samples)
   { anno <- csvtable %>% dplyr::select(indfactor, pair.ident)} else
   { anno <- csvtable %>% dplyr::select(indfactor)}
-  anno <- as.data.frame(sapply(anno, factor))
+  anno <- anno %>% mutate(across(.fns = factor)) %>% as.data.frame()
   rownames(anno) <- rownames(csvtable)
   anno <- anno[sub(rownames(anno), pattern = "#.*$", replacement = "") %in% s.names, , drop = F]
   if(paired.samples) {
@@ -751,6 +758,7 @@ for(impact in impacts) {
 if(! file.exists("Warning.no.vcfs.txt")) {
 
 if(txt.file != "NA") {
+  cat("Performing the VEP analysis for the selected list of genes...\n")
   con <- file(txt.file)
   gene.list1 <- unique(gsub(readLines(con), pattern = "\\s", replacement = ""))
   close(con)
@@ -759,8 +767,8 @@ if(txt.file != "NA") {
   for(i in gene.list1) {if(length(alias2Symbol(i, species = "Hs")) == 0) {gene.list1.conv <- append(gene.list1.conv, values = i)} else {gene.list1.conv <- append(gene.list1.conv, values = alias2Symbol(i, species = "Hs"))}}
   gene.list1.conv <- unique(gene.list1.conv)
   
-  cat("Loading a pre-existing RData file:", paste0("../../", runid, ".", antype, ".df.full.RData...\n"))
-  load(paste0("../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
+  cat("Loading a pre-existing RData file:", paste0("../../../../../", runid, ".", antype, ".df.full.RData...\n"))
+  load(paste0("../../../../../", runid, ".", antype, ".df.full.RData"), envir = .GlobalEnv)
   read.args()
 
 if(!is.null(df.full)) {
@@ -825,6 +833,7 @@ if(!is.null(df.full)) {
   saveWorkbook(wb = wb2, file = paste(prefix, paste("gene.signature", gene.signature, sep = ":"), "VEP_analysis.xlsx", sep = "."), overwrite = T)
   }
 }
+cat("Saving the R environment to a file...\n")
 save.image(file = paste(prefix, "VEP_analysis.final.RData", sep = "."))
 }
 }
