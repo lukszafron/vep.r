@@ -480,7 +480,7 @@ s.names <- gsub(s.names, pattern = "#", replacement = ".")
 
 if(length(file.list) > 0) {
 
-sel.columns <- c("Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "CANONICAL", "IMPACT")
+sel.columns <- c("Gene", "SYMBOL", "SOURCE", "HGVSg", "HGVSc", "HGVSp", "Existing_variation", "Consequence", "SIFT", "PolyPhen", "MAX_AF", "CLIN_SIG", "PUBMED", "ZYG", "CANONICAL", "IMPACT", "Allele")
 
 if(!file.exists(paste0("../../../../../", runid, ".", antype, ".df.full.RData"))) {
 
@@ -488,6 +488,8 @@ cat("Generating the first list of hits...\n")
 df.list <- foreach(i = file.list) %dopar% {
 file.tmp <- fread(file = i, sep = "\t", header = T, select = c(sel.columns))
 file.tmp <- file.tmp[file.tmp[["SOURCE"]] %in% c("RefSeq", "Ensembl") & grepl(file.tmp[["IMPACT"]], pattern = "(HIGH|MODERATE)"), , drop = F]
+file.tmp <- file.tmp[!grepl(file.tmp[["Allele"]], pattern = "(AAAAAAA|GGGGGGG|CCCCCCC|TTTTTTT)"), , drop = F]
+file.tmp[["Allele"]] <- NULL
 file.tmp[["MAX_AF"]][file.tmp[["MAX_AF"]] == "-"] <- -1
 file.tmp}
 names(df.list) <- s.names
@@ -521,20 +523,25 @@ df.full <- foreach(Sample.name = s.names, .combine = rbind) %dopar% {
 
     hit.sift <- hit.df[["SIFT"]]
     hit.sift <- sub(hit.sift, pattern = "\\([0-9.]+\\)", replacement = "")
-    hit.sift <- names(table(hit.sift)[which.max(table(hit.sift))])
+    tt = sort(table(hit.sift), decreasing = T)
+    hit.sift <- names(if(length(tt) > 1 & names(tt)[1] == "-") {tt[2]} else {tt[1]})
     hit.df[["SIFT"]] <- hit.sift
     
     hit.polyphen <- hit.df[["PolyPhen"]]
     hit.polyphen <- sub(hit.polyphen, pattern = "\\([0-9.]+\\)", replacement = "")
-    hit.polyphen <- names(table(hit.polyphen)[which.max(table(hit.polyphen))])
+    tt = sort(table(hit.polyphen), decreasing = T)
+    hit.polyphen <- names(if(length(tt) > 1 & names(tt)[1] == "-") {tt[2]} else {tt[1]})
     hit.df[["PolyPhen"]] <- hit.polyphen
     
     hit.clinsig <- hit.df[["CLIN_SIG"]]
-    hit.clinsig <- names(table(hit.clinsig)[which.max(table(hit.clinsig))])
+    hit.clinsig <- sub(hit.clinsig, pattern = "\\([0-9.]+\\)", replacement = "")
+    tt = sort(table(hit.clinsig), decreasing = T)
+    hit.clinsig <- names(if(length(tt) > 1 & names(tt)[1] == "-") {tt[2]} else {tt[1]})
     hit.df[["CLIN_SIG"]] <- hit.clinsig
     
     hit.maxaf <- hit.df[["MAX_AF"]]
-    hit.maxaf <- names(table(hit.maxaf)[which.max(table(hit.maxaf))])
+    tt = sort(table(hit.maxaf), decreasing = T)
+    hit.maxaf <- names(if(length(tt) > 1 & names(tt)[1] == "-1") {tt[2]} else {tt[1]})
     hit.df[["MAX_AF"]] <- hit.maxaf
     
     hit.df}
@@ -547,7 +554,7 @@ df.full <- foreach(Sample.name = s.names, .combine = rbind) %dopar% {
     df.hit[which.min(rowSums(df.hit == "-")), , drop = F]
     }
   
-  df.tmp <- df.tmp[ !grepl(df.tmp[["SIFT"]], pattern = "(tolerated|-)") | !grepl(df.tmp[["PolyPhen"]], pattern = "(benign|-|unknown)") | !grepl(df.tmp[["CLIN_SIG"]], pattern = "(benign|-|^not_provided$|^protective$)") | as.numeric(df.tmp[["MAX_AF"]]) < 0.01, , drop = F]
+  df.tmp <- df.tmp[ !grepl(df.tmp[["SIFT"]], pattern = "(tolerated|low_confidence|^-$)") | !grepl(df.tmp[["PolyPhen"]], pattern = "(benign|^-$|^unknown$)") | !grepl(df.tmp[["CLIN_SIG"]], pattern = "(benign|^-$|^not_provided$|protective|^uncertain_significance$)") | as.numeric(df.tmp[["MAX_AF"]]) < 0.01, , drop = F]
   df.tmp[["MAX_AF"]][df.tmp[["MAX_AF"]] == "-1"] <- "-"
   df.tmp
    }
