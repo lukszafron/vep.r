@@ -520,6 +520,10 @@ df.full <- foreach(Sample.name = s.names, .combine = rbind) %dopar% {
   df.tmp <- foreach(hit = hits, .combine = rbind) %do% {
     hit.vec <- unlist(strsplit(hit, split = " "))
     hit.df <- df.tmp[df.tmp[["SYMBOL"]] == hit.vec[1] & df.tmp[["HGVSg"]] == hit.vec[2] & df.tmp[["IMPACT"]] == hit.vec[3], , drop = F]
+    
+    if(any(hit.df$CANONICAL == "YES")){
+      hit.df <- hit.df[hit.df$CANONICAL == "YES", , drop = F]
+    }
 
     hit.sift <- hit.df[["SIFT"]]
     hit.sift <- sub(hit.sift, pattern = "\\([0-9.]+\\)", replacement = "")
@@ -543,17 +547,9 @@ df.full <- foreach(Sample.name = s.names, .combine = rbind) %dopar% {
     tt = sort(table(hit.maxaf), decreasing = T)
     hit.maxaf <- names(if(length(tt) > 1 & names(tt)[1] == "-1") {tt[2]} else {tt[1]})
     hit.df[["MAX_AF"]] <- hit.maxaf
+    hit.df[which.min(rowSums(hit.df == "-")), , drop = F]  
+  }
     
-    hit.df}
-  
-    df.tmp <- foreach(hit = hits, .combine = rbind) %do% {
-    df.hit <- df.tmp[df.tmp[,c("SYMBOL","HGVSg","IMPACT"), drop = F] %>% unite(col = "United", sep = " ") == hit, , drop = F]
-    if(any(df.hit[["CANONICAL"]] == "YES")) {
-    df.hit <- subset(df.hit, subset = CANONICAL == "YES")
-    }
-    df.hit[which.min(rowSums(df.hit == "-")), , drop = F]
-    }
-  
   df.tmp <- df.tmp[ !grepl(df.tmp[["SIFT"]], pattern = "(tolerated|low_confidence|^-$)") | !grepl(df.tmp[["PolyPhen"]], pattern = "(benign|^-$|^unknown$)") | !grepl(df.tmp[["CLIN_SIG"]], pattern = "(benign|^-$|^not_provided$|protective|^uncertain_significance$)") | as.numeric(df.tmp[["MAX_AF"]]) < 0.01, , drop = F]
   df.tmp[["MAX_AF"]][df.tmp[["MAX_AF"]] == "-1"] <- "-"
   df.tmp
