@@ -1,4 +1,4 @@
-# $${\color{lightgreen}Vep.r}$$
+# $${\color{green}Vep.r}$$
 
 This R script was developed to extend the possibilities of the ENSEMBL Variant Effect Predictor app. In combination with the vep.comparison.r, it offers the ability to identify genetic variants with a high or moderate impact on the structure/function of the corresponding proteins. The results are supplemented with detailed statistical analyses followed by the visualization of the results, allowing for the determination of genes that are characterized by a higher frequency of genetic alterations in some groups of samples compared to others.
 
